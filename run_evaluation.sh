@@ -24,6 +24,10 @@ show_help() {
     echo "  -i, --save_individual    保存每个案例的单独评估结果"
     echo "  -h, --help               显示此帮助信息"
     echo ""
+    echo "说明:"
+    echo "  该脚本现在支持处理预测文件与真值文件命名不一致的情况，"
+    echo "  只要文件名中包含相同的数字标识（如0181）即可自动匹配。"
+    echo ""
     echo "示例:"
     echo "  $0 -p /path/to/predictions -g /path/to/ground_truth -o /path/to/output"
     echo "  $0 -p /path/to/predictions -g /path/to/ground_truth -o /path/to/output -r /path/to/probability_maps -t 0.6 -i"
@@ -134,7 +138,7 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # 构建命令
-CMD="python /groupshare/data/3D-TransUNet-main/evaluate_segmentation.py \
+CMD="python ./evaluate_segmentation.py \
     --pred_dir \"$PRED_DIR\" \
     --gt_dir \"$GT_DIR\" \
     --output_dir \"$OUTPUT_DIR\" \

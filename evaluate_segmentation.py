@@ -15,6 +15,7 @@ import pandas as pd
 import SimpleITK as sitk
 from glob import glob
 from tqdm import tqdm
+import re
 from datetime import datetime
 from medpy import metric
 import matplotlib.pyplot as plt
@@ -133,6 +134,53 @@ def load_nifti(file_path):
     array = sitk.GetArrayFromImage(sitk_img)
     return array, sitk_img, spacing
 
+def find_matching_gt_file(pred_file, gt_dir):
+    """根据预测文件名中的数字标识查找匹配的真值文件"""
+    # 从预测文件名中提取数字标识
+    pred_basename = os.path.basename(pred_file)
+    numbers = re.findall(r'\d+', pred_basename)
+    
+    if not numbers:
+        return None
+    
+    # 查找包含相同数字标识的真值文件
+    gt_files = glob(os.path.join(gt_dir, "*.nii.gz"))
+    for gt_file in gt_files:
+        gt_basename = os.path.basename(gt_file)
+        gt_numbers = re.findall(r'\d+', gt_basename)
+        
+        # 检查是否有匹配的数字标识
+        for num in numbers:
+            if num in gt_numbers:
+                return gt_file
+    
+    return None
+
+def find_matching_prob_file(pred_file, prob_dir):
+    """根据预测文件名中的数字标识查找匹配的概率图文件"""
+    if not prob_dir:
+        return None
+        
+    # 从预测文件名中提取数字标识
+    pred_basename = os.path.basename(pred_file)
+    numbers = re.findall(r'\d+', pred_basename)
+    
+    if not numbers:
+        return None
+    
+    # 查找包含相同数字标识的概率图文件
+    prob_files = glob(os.path.join(prob_dir, "*.npz"))
+    for prob_file in prob_files:
+        prob_basename = os.path.basename(prob_file)
+        prob_numbers = re.findall(r'\d+', prob_basename)
+        
+        # 检查是否有匹配的数字标识
+        for num in numbers:
+            if num in prob_numbers:
+                return prob_file
+    
+    return None
+
 def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_individual=False, prob_dir=None):
     """评估分割结果"""
     logger = setup_logger(output_dir)
@@ -150,6 +198,7 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
     # 初始化指标收集器
     all_metrics = {
         'case_id': [],
+        'gt_file': [],
         'dice': [],
         'roi_dice': [],
         'precision': [],
@@ -172,11 +221,13 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
     # 处理每个预测文件
     for pred_file in tqdm(pred_files, desc="评估分割结果"):
         case_id = os.path.basename(pred_file)
-        gt_file = os.path.join(gt_dir, case_id)
+        
+        # 查找匹配的真值文件
+        gt_file = find_matching_gt_file(pred_file, gt_dir)
         
         # 检查真值文件是否存在
-        if not os.path.exists(gt_file):
-            logger.warning(f"找不到真值文件: {gt_file}")
+        if gt_file is None:
+            logger.warning(f"找不到匹配的真值文件: {case_id}")
             continue
         
         # 加载预测和真值
@@ -202,6 +253,7 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
         
         # 收集指标
         all_metrics['case_id'].append(case_id)
+        all_metrics['gt_file'].append(os.path.basename(gt_file))
         all_metrics['dice'].append(dice)
         all_metrics['roi_dice'].append(roi_dice)
         all_metrics['precision'].append(precision)
@@ -213,13 +265,31 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
         
         # 如果有概率图目录，加载概率图并收集数据用于ROC和PR曲线
         if prob_dir:
-            prob_file = os.path.join(prob_dir, case_id.replace('.nii.gz', '.npz'))
-            if os.path.exists(prob_file):
+            # 查找匹配的概率图文件
+            prob_file = find_matching_prob_file(pred_file, prob_dir)
+            
+            if prob_file and os.path.exists(prob_file):
                 prob_data = np.load(prob_file)
-                prob_map = prob_data['softmax']
+                # 处理不同格式的概率图
+                if 'softmax' in prob_data:
+                    prob_map = prob_data['softmax']
+                    # 确保获取正确的前景类别概率
+                    if prob_map.shape[0] > 1:
+                        flat_prob = prob_map[1].flatten()  # 假设索引1是前景类别
+                    else:
+                        flat_prob = prob_map[0].flatten()
+                else:
+                    # 尝试其他可能的键名
+                    for key in prob_data.keys():
+                        if isinstance(prob_data[key], np.ndarray):
+                            prob_map = prob_data[key]
+                            break
+                    
+                    if prob_map.shape[0] > 1:
+                        flat_prob = prob_map[1].flatten()
+                    else:
+                        flat_prob = prob_map.flatten()
                 
-                # 收集所有体素的概率和标签
-                flat_prob = prob_map[1].flatten()  # 假设索引1是前景类别
                 flat_gt = gt_binary.flatten()
                 
                 # 随机采样以减少数据量（对于大型3D图像）
@@ -233,7 +303,7 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
         
         # 记录个例结果
         hd95_str = f"{hd95:.4f}" if hd95 != float('inf') else "inf"
-        logger.info(f"案例 {case_id}: Dice={dice:.4f}, ROI Dice={roi_dice:.4f}, Precision={precision:.4f}, Recall={recall:.4f}, HD95={hd95_str}, IoU={iou:.4f}")
+        logger.info(f"案例 {case_id} (匹配真值: {os.path.basename(gt_file)}): Dice={dice:.4f}, ROI Dice={roi_dice:.4f}, Precision={precision:.4f}, Recall={recall:.4f}, HD95={hd95_str}, IoU={iou:.4f}")
         
         # 保存个例结果
         if save_individual:
@@ -241,6 +311,8 @@ def evaluate_segmentation(pred_dir, gt_dir, output_dir, threshold=0.5, save_indi
             os.makedirs(case_output_dir, exist_ok=True)
             
             with open(os.path.join(case_output_dir, f"{case_id.replace('.nii.gz', '')}_metrics.txt"), 'w') as f:
+                f.write(f"预测文件: {case_id}\n")
+                f.write(f"真值文件: {os.path.basename(gt_file)}\n")
                 f.write(f"Dice: {dice:.4f}\n")
                 f.write(f"ROI Dice: {roi_dice:.4f}\n")
                 f.write(f"Precision: {precision:.4f}\n")
